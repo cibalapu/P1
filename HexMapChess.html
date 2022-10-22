@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+    <title>HexMap Chess</title>
+    <style>
+*
+{
+    margin: 0px;
+    border: 0px solid transparent;
+    outline: 0px solid transparent;
+    padding: 0px;
+}
+div.wrapper
+{
+    position: fixed;
+    top: 0px;
+    left: 0px;
+    right: 0px;
+    bottom: 0px;
+}
+
+canvas
+{
+    position: relation;
+    width: 100%;
+    height: 100%;
+    display: block;
+    font-family: '微軟正黑體', Arial;
+}
+    </style>
+</head>
+
+<body>
+
+<div class="wrapper"><canvas id="viewport"></canvas></div>
+
+<script type="text/javascript" src="scripts/canvas.js"></script>
+<script type="text/javascript" src="scripts/graphics.js"></script>
+
+<script>
+
+class HexGrid {
+    constructor(x,y,shift) {
+        this.center = new kjGraphics.Point(x,y);
+        this.shift = shift;
+        this.height = 1;
+        this.troop = null;
+        this.cost = 1;
+        this.mist = 0;
+    };
+};
+
+class HexMap {
+    constructor(w,d) {
+        this.grids = [];
+        this.size = w * d;
+        let x, y, w2 = w / 2, d2 = d / 2;
+        for(y=0;y<d;y++) {
+            for(x=0;x<w;x++) {
+                this.grids.push(new HexGrid(x-w2,y-d2,y%2==0));
+            }
+        }
+        this.cols = w;
+        this.rows = d;
+        this.width = w * 2 + 1;
+        this.deep = d * 1.5 + 0.5;
+    };
+
+    find(x,y) {
+        if (y<0 || y>=this.rows
+         || x<0 || x>=this.cols) { return null; }
+        let index = y * this.cols + x;
+        if (index<0 || index>this.size) { return null; }
+        return this.grids[index];
+    };
+
+    nearby(g,range) {
+        let base = [g], next = [], exists = [], ret = [];
+        for(let i=1;i<=range;i++) {
+            next = [];
+            base.map((bg)=>{
+                let sx = bg.shift ? -1 : 0,
+                    index = this.grids.indexOf(bg),
+                    gx = index % this.cols,
+                    gy = (index-gx) / this.cols;
+                if (index<0) { return; }
+                [[sx,sx+1],[-1,1],[sx,sx+1]].map((xs,y)=>{
+                    let dy = y - 1, d = dy * this.cols;
+                    if (gy+dy<0 || gy+dy>=this.rows) { return; }
+                    xs.map((dx)=>{
+                        if (gx+dx<0 || gx+dx>=this.cols) { return; }
+                        let ng = this.grids[(index+d+dx)];
+                        if (exists.indexOf(ng)>=0) { return; }
+                        if (ng.height<=0) { return; }
+                        exists.push(ng);
+                        ret.push({
+                            "distance": i,
+                            "grid": ng
+                        });
+                        next.push(ng);
+                    });
+                });
+            });
+            base = next;
+            if (base.length<=0) { break; }
+        }
+        return ret;
+    };
+};
+
+class RNGAttribute {
+    constructor(data) {
+        if (data==null) { data = {"min":0,"max":0}; }
+        this.base = Math.min(data.min,data.max);
+        this.range = Math.max(data.min,data.max) - this.base;
+    };
+
+    roll() {
+        return Math.floor(Math.random()*(this.range+1)) + this.base;
+    };
+
+    toString() {
+        return [this.base,"~",this.base+this.range].join(" ");
+    };
+};
+
+attackTypeList = ["physic","psycho","heat","cold","acid"];
+class General {
+    constructor(name,data) {
+        this.name = name;
+        this.attackType = data.attack.type;
+        this.attackDamage = new RNGAttribute(data.attack.damageRNG);
+        this.defences = {};
+        if (!("defences" in data)) { data.defences = {}; }
+        if (typeof(data.defences)!="object") { data.defences = {}; }
+        attackTypeList.map((t)=>{
+            let def = {"min":0,"max":0};
+            if (t in data.defences) { def = data.defences[t]; }
+            this.defences[t] = new RNGAttribute(def);
+        });
+        this.vision = data.vision | 1;
+        this.movement = data.movement | 1;
+        this.skills = [];
+    };
+};
+
+class Troop {
+    constructor(player,general,ethnos) {
+        this.owner = player;
+        this.general = general;
+        this.ethnos = ethnos;
+        this.size = 10000;
+        this.grid = null;
+    };
+};
+
+const a = Math.PI / 3, a2 = a / 2;
+class MapDrawer {
+    constructor(canvas,map,gridsize,padding) {
+        this.canvas = canvas;
+        this.map = map;
+        this.pivot = new kjGraphics.Point(0,0);
+        this.center = new kjGraphics.Point(this.canvas.width/2,this.canvas.height/2);
+        this.selected = null;
+        this.mousepoint = new kjGraphics.Point(-gridsize,-gridsize);
+        this.scale = 1;
+        this.radius = gridsize;
+        this.padding = padding;
+        this.backgroundColor = "rgb(0,128,255)";
+        this.lineWidth = 1;
+        this.gridLineColor = "rgb(0,0,0)";
+        this.gridFillColor = "white";
+        this.hoverLineColor = "rgba(0,0,0,0)";
+        this.hoverFillColor = "rgba(255,255,0,1)";
+        this.hoverLineWidth = 0;
+    };
+
+    seekGridCenter(g) {
+        let radius = this.radius * this.scale,
+            rr = radius / Math.cos(a2),
+            rp = g.center.clone().sub(this.pivot)
+                .mul(2*radius,1.5*rr)
+                .add((g.shift?0:radius),0),
+            cp = this.center.clone().add(rp);
+        if (cp.x<-rr || cp.x>this.canvas.width+rr
+         || cp.y<-rr || cp.y>this.canvas.height+rr) {
+            return null;
+        }
+        return cp;
+    };
+
+    drawGrid(g,gap) {
+        if (g.height<=0) { return; }
+        let cp = this.seekGridCenter(g);
+        if (cp==null) { return; }
+        let ctx = this.canvas.context,
+            sr = this.radius * this.scale,
+            gr = sr / Math.cos(a2) + gap;
+        if (kjGraphics.Point.Distance(cp,this.mousepoint)<sr) {
+            this.selected = g;
+        }
+        ctx.beginPath();
+        for(let s=0;s<6;s++) {
+            let radian = a * s + a2,
+                x = cp.x + gr * Math.cos(radian),
+                y = cp.y + gr * Math.sin(radian);
+            if (s==0) { ctx.moveTo(x,y); }
+            else { ctx.lineTo(x,y); }
+        }
+        ctx.closePath();
+        ctx.stroke();
+        ctx.fill();
+    };
+
+    drawMist(g) {
+        if (g.height<=0) { return; }
+        let cp = this.seekGridCenter(g);
+        if (cp==null) { return; }
+        let ctx = this.canvas.context,
+            rr = this.radius * this.scale / Math.cos(a2);
+        ctx.beginPath();
+        for(let s=0;s<6;s++) {
+            let radian = a * s + a2,
+                x = cp.x + rr * Math.cos(radian),
+                y = cp.y + rr * Math.sin(radian);
+            if (s==0) { ctx.moveTo(x,y); }
+            else { ctx.lineTo(x,y); }
+        }
+        ctx.closePath();
+        const max_mist = 0.8;
+        ctx.fillStyle = "rgba(0,0,0,"+(max_mist*(1-g.mist))+")";
+        ctx.fill();
+    };
+
+    drawTroop(t) {
+        let g = t.grid;
+        let cp = this.seekGridCenter(g);
+        if (cp==null) { return; }
+        let ctx = this.canvas.context,
+            r = this.radius * this.scale,
+            rr = r / Math.cos(a2);
+        let fontsize = Math.floor(rr*100/4) / 100,
+            max = r * 2,
+            gn = t.general.name;
+        if (fontsize<14) {
+            ctx.beginPath();
+            ctx.arc(cp.x,cp.y,r/2,0,2*Math.PI);
+            ctx.closePath();
+            ctx.fill();
+            //ctx.stroke();
+            return;
+        }
+        ctx.font = fontsize + "px Arial";
+        let w = Math.ceil(ctx.measureText(gn).width);
+        if (w>max) {
+            fontsize = fontsize * max / w * 0.9;
+            ctx.font = fontsize + "px Arial";
+            w = Math.ceil(ctx.measureText(gn).width);
+        }
+        ctx.fillText(gn,cp.x-(w/2),cp.y+(rr/2));
+    };
+
+    draw() {
+        this.selected = null;
+        let ctx = this.canvas.context;
+        ctx.fillStyle = this.backgroundColor;
+        ctx.fillRect(0,0,this.canvas.width,this.canvas.height);
+        ctx.strokeStyle = this.gridLineColor;
+        ctx.lineWidth = this.lineWidth;
+        ctx.fillStyle = this.gridFillColor;
+        this.map.grids.map((g)=>{ this.drawGrid(g,0); });
+        if (this.selected!=null) {
+            ctx.strokeStyle = this.hoverLineColor;
+            ctx.fillStyle = this.hoverFillColor;
+            ctx.lineWidth = this.hoverLineWidth;
+            this.drawGrid(this.selected,-1);
+        }
+        ctx.fillStyle = "rgb(0,128,0)";
+        ctx.strokeStyle = "rgb(0,0,0)";
+        ctx.lineWidth = 1;
+        this.map.grids.map((g)=>{
+            if (g.troop==null) { return; }
+            this.drawTroop(g.troop);
+        });
+        this.map.grids.map((g)=>{ this.drawMist(g); });
+        /*Center Point
+        ctx.beginPath();
+        ctx.arc(this.center.x,this.center.y,5,0,2*Math.PI);
+        ctx.closePath();
+        ctx.fillStyle = "rgb(255,255,0)";
+        ctx.fill();*/
+    };
+
+    move(delta) {
+        let radius = this.radius * this.scale,
+            padding = this.padding * radius,
+            outer = radius / Math.cos(a2),
+            rx = this.canvas.width - this.map.width * radius,
+            ry = this.canvas.height - this.map.deep * outer,
+            d = this.pivot.clone()
+                .sub(delta.clone().div(2*radius,1.5*outer))
+                .mul(-2*radius,-1.5*outer)
+                .sub(radius/2, outer*0.75),
+            signal = d.clone().mul(delta);
+        if (rx!=0) {
+            let x2 = Math.abs(rx) / 2 + ((rx<0)?padding:0);
+            if (Math.abs(d.x)>x2 && signal.x>0) { delta.x = 0; }
+        } else { delta.x = 0; }
+        if (ry!=0) {
+            let y2 = Math.abs(ry) / 2 + ((ry<0)?padding:0);
+            if (Math.abs(d.y)>y2 && signal.y>0) { delta.y = 0; }
+        } else { delta.y = 0; }
+        this.pivot.sub(delta.clone().div(2*radius,1.5*outer));
+    };
+
+    select(pt) {
+        if (pt==null) {
+            this.mousepoint.x = -this.canvas.width;
+            this.mousepoint.y = -this.canvas.height;
+            return;
+        }
+        this.mousepoint = pt;
+    };
+
+    scale(scalar) {
+        this.scale = scalar;
+    };
+};
+
+const c = new kjDemo.Canvas("#viewport"),
+    m = new HexMap(20,20), times = 800;//, r = 5;
+/*function sed() {
+    let g = m.grids[Math.floor(Math.random()*m.size)];
+    g.height += r;
+    m.nearby(g,r-1).map((nb)=>{
+        nb.grid.height += r - nb.distance;
+    });
+};
+for(let i=0;i<times;i++) { sed(); }
+let max = 0, min = times;
+m.grids.map((g)=>{
+    let total = g.height, count = 1;
+    m.nearby(g,r).map((nb)=>{
+        total += nb.grid.height;
+        count++;
+    });
+    g.height = total / count;
+    if (g.height>max) { max = g.height; }
+    if (g.height<min) { min = g.height; }
+});
+let surf = min + (max-min) * 0.2;
+let hdata = m.grids.map((g)=>{
+    g.height -= surf;
+    return g.height;
+});*/
+//console.log(hdata);
+/*m.grids.map((g)=>{
+    g.height = (Math.random()<0.1) ? 0 : 1;
+});*/
+
+let gen = new General("趙雲",{"attack":{}}),
+    trp = new Troop(null,gen,"蜀");
+m.grids[210].troop = trp;
+trp.grid = m.grids[210];
+
+const md = new MapDrawer(c,m,50,0.4);
+
+// HexMap Canvas
+let input_status = 0, last_pt = null;
+c.element.addEventListener("mouseenter",function(e) {
+    // Resume()
+    if (e.buttons==0) { input_status = 0; }
+});
+c.element.addEventListener("mouseleave",function(e) {
+    // Pause()
+});
+c.element.addEventListener("mousedown",function(e) {
+    input_status = 1;
+    // try click
+    if (md.selected!=null) {
+        md.selected.mist = 1;
+        const seek = 3;
+        let nbs = m.nearby(md.selected,seek);
+        nbs.map(function(nb) {
+            let g = nb.grid, v = 1 - (nb.distance / (seek+1));
+            if (g.mist<v) { g.mist = v; }
+        });
+    }
+});
+c.element.addEventListener("mouseup",function(e) {
+    input_status = 0;
+    let m_pt = new kjGraphics.Point(e.clientX,e.clientY),
+        d_pt = m_pt.clone().sub(last_pt);
+});
+c.element.addEventListener("mousemove",function(e) {
+    let m_pt = new kjGraphics.Point(e.clientX,e.clientY);
+    switch (input_status) {
+    case 0: // common
+        md.select(m_pt);
+        break;
+    case 1: // dragging
+        md.select(null);
+        if (last_pt==null) { break; }
+        let d_pt = m_pt.clone().sub(last_pt);//.mul(0.5);
+        md.move(d_pt);
+        break;
+    case 2:
+        break;
+    }
+    last_pt = m_pt.clone();
+});
+c.element.addEventListener("mousewheel",function(e) {
+    //const scale = 10;
+    if (e.wheelDelta>0 && md.scale<2) { md.scale *= 1.1; }
+    if (e.wheelDelta<0 && md.scale>0.4) { md.scale *= 0.9; }
+});
+
+let last = 0;
+function animate(time) {
+    c.context.clearRect(0,0,c.width,c.height);
+    if (last!=0) {
+        md.draw();
+        //return;
+    }
+    last = time;
+    requestAnimationFrame(animate);
+};
+requestAnimationFrame(animate);
+</script>
+
+</body>
+
+</html>
